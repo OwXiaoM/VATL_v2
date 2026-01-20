@@ -141,20 +141,80 @@ class AtlasBuilder:
 
     def generate_subjects_from_df(self, idcs_df=None, epoch=0, split='train'):
         """
-        (Re)Generate subjects from the current dataset via dataframe indices.
+        (Re)Generate subjects in their NATIVE space (aligned with original image).
         """
+        import nibabel as nib 
         metrics = []
+        
+        # 定义一个辅助函数：生成原生网格
+        def generate_native_grid(header_nii, world_bbox):
+            # 1. 获取原图的尺寸和变换矩阵
+            shape = header_nii.shape
+            affine = header_nii.affine
+            
+            # 2. 生成原图每个体素的索引 (i, j, k)
+            # 注意：这里生成的网格必须和原图 shape 一模一样
+            i = torch.arange(0, shape[0], device=self.device)
+            j = torch.arange(0, shape[1], device=self.device)
+            k = torch.arange(0, shape[2], device=self.device)
+            grid = torch.meshgrid(i, j, k, indexing='ij')
+            grid_coords_idx = torch.stack(grid, dim=-1).reshape(-1, 3).float() # (N, 3)
+            
+            # 3. 将索引转换为物理坐标 (Native Physical Coordinates)
+            # P = A * idx
+            # 使用 torch 矩阵乘法加速
+            affine_torch = torch.tensor(affine, dtype=torch.float32, device=self.device)
+            # [N, 3] -> [N, 4] (homogenous)
+            ones = torch.ones((grid_coords_idx.shape[0], 1), device=self.device)
+            grid_coords_homo = torch.cat([grid_coords_idx, ones], dim=1)
+            # P = (A @ idx.T).T
+            grid_coords_phys = (affine_torch @ grid_coords_homo.T).T[:, :3]
+            
+            # 4. 执行和 Dataset.py 完全一致的归一化逻辑
+            # training_coords = (phys - geometric_center) / (bbox / 2)
+            
+            # 计算几何中心 (Geometric Center)
+            img_center_index = torch.tensor(shape, device=self.device) / 2.0
+            # geometric_center = A * center_idx
+            center_homo = torch.cat([img_center_index, torch.tensor([1.0], device=self.device)])
+            geometric_center = (affine_torch @ center_homo)[:3]
+            
+            # 归一化
+            # coords = phys - center
+            grid_coords_norm = grid_coords_phys - geometric_center
+            
+            # Scale by bbox
+            wb_torch = torch.tensor(world_bbox, dtype=torch.float32, device=self.device)
+            grid_coords_norm = grid_coords_norm / (wb_torch / 2.0)
+            
+            return grid_coords_norm, list(shape), affine
+
         for idx_df in idcs_df:
             df_row_dict = self.datasets[split].df.iloc[idx_df].to_dict()
-            grid_coords, grid_shape, affine = generate_world_grid(self.args, device=self.device)
+            
+            ref_mod_path = df_row_dict[self.args['dataset']['modalities'][0]]
+            ref_nii = nib.load(ref_mod_path)
+            grid_coords, grid_shape, affine = generate_native_grid(
+                ref_nii, 
+                self.args['dataset']['world_bbox']
+            )
+            
             with torch.no_grad():
                 transformations = self.transformations[split][idx_df, None]
                 conditions = self.datasets[split].load_conditions(df_row_dict).to(self.device)
-                volume_inf = self.inr_decoder[split].inference(grid_coords, self.latents[split][idx_df:idx_df+1], 
-                                                        conditions, grid_shape, transformations)
-            if self.args['compute_metrics']: # compute metrics and save images if enabled
+                
+                # Inference
+                volume_inf = self.inr_decoder[split].inference(
+                    grid_coords, 
+                    self.latents[split][idx_df:idx_df+1], 
+                    conditions, 
+                    grid_shape, 
+                    transformations
+                )
+            
+            if self.args['compute_metrics']:
                 metrics.append(compute_metrics(self.args, volume_inf, affine, df_row_dict, epoch, split))
-            elif self.args['save_imgs'][split]: # save images if enabled
+            elif self.args['save_imgs'][split]:
                 save_subject(self.args, volume_inf, affine, df_row_dict, epoch, split)
         
         return metrics

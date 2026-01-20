@@ -14,9 +14,9 @@ amp: False
 seed: 42
 
 # --------- General Options ---------
-generate_cond_atlas: False # if True, generate the spatio-temporal (conditioned) atlas 
-mask_reconstruction: False # mask inference reconstruction to remove noisy background
-save_certainty_maps: False # if True, save the certainty maps (tissue probability maps)
+generate_cond_atlas: True # if True, generate the spatio-temporal (conditioned) atlas 
+mask_reconstruction: True # mask inference reconstruction to remove noisy background
+save_certainty_maps: True # if True, save the certainty maps (tissue probability maps)
 compute_metrics: True # if True, compute the metrics for subject adaptation (requires GT references for each modality)
 save_imgs: # if True, save the reconstruction images for the training/validation set
   train: True 
@@ -106,7 +106,7 @@ atlas_gen:
 # --------- Latent Space Analysis ---------
 latent_anaylsis: # to predict scan_age from latentcode or explciit conditions during test-time
   activate: False
-  predict_scan_age: 'none' #NCA, none for no prediction
+  predict_scan_age: 'NCA' #NCA, none for no prediction
   predict_birth_age: 'none' #NCA, none for no prediction, used for implicit birth-age prediction from latent code for ablation study.
   predict_ext_condition: 'none' #'MAE'  # predict a condition for test-time subjects, MAE for birth-age, binary crossentropy for sex, none for no prediction
   ba_regression:
@@ -123,6 +123,6 @@ epochs: # number of epochs for training/validation
   train: 1000
   val: 1 # the num epochs for latent code optimization, redone for each validation cycle)
 validate_every: 1
-batch_size: 16 # batch size for training/validation (number of subjects per batch)
+batch_size: 4 # batch size for training/validation (number of subjects per batch)
 n_samples: 50000 # number of coordinates in each "inner_batch" sampled across the subejct batch
 num_workers: 8 # number of workers for dataloader
