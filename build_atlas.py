@@ -51,9 +51,9 @@ class AtlasBuilder:
             loss_hist_epochs.append(loss)
             
             print(f"Training: Epoch: {epoch}, Loss: {np.mean(loss_hist_epochs):.4f}, Total Time Epoch: {time.time() - start_time:.2f}s")
-     
+
             if epoch > 0 and (epoch % self.args['validate_every'] == 0 or epoch == total_epochs - 1):
-                self.validate(epoch) 
+                self.validate(epoch)
                 
             self._update_scheduler(split='train')
             
@@ -70,7 +70,7 @@ class AtlasBuilder:
             loss_hist_batches.append(loss)
             print(f"Split: {split}, Current Epoch: {epoch}, Loss Batch: {loss:.4f}, Total Training Time Batch: {time.time() - start_time:.2f}s")
         return np.mean(loss_hist_batches)
-
+        
     def train_batch(self, batch, epoch, split='train'):
         loss_hist_samples = []
         n_smpls = self.args['n_samples']
@@ -79,6 +79,7 @@ class AtlasBuilder:
         sample_iterator = range(0, idx_df_batch.shape[0], n_smpls)
         start_time = time.time()
         print(f"Split: {split}, Current Epoch: {epoch}, Starting Batch ...\n")
+        
         for i, smpls in enumerate(sample_iterator):
             self.optimizers[split].zero_grad()
             coords = coords_batch[smpls:smpls + n_smpls]
@@ -95,10 +96,22 @@ class AtlasBuilder:
 
             if self.args['amp']:    
                 self.grad_scalers[split].scale(loss['total']).backward()
+                
+                # [新增] AMP 模式下的梯度裁剪 (如果你未来开启 AMP)
+                if split == 'train':
+                    self.grad_scalers[split].unscale_(self.optimizers[split])
+                    torch.nn.utils.clip_grad_norm_(self.inr_decoder[split].parameters(), max_norm=1.0)
+                
                 self.grad_scalers[split].step(self.optimizers[split])
                 self.grad_scalers[split].update()
             else:
                 loss['total'].backward()
+                
+                # [新增] 普通模式下的梯度裁剪 (这是你现在的关键代码)
+                # 只有在 'train' 阶段才裁剪主网络的梯度，防止脏数据炸毁模型
+                if split == 'train':
+                    torch.nn.utils.clip_grad_norm_(self.inr_decoder[split].parameters(), max_norm=1.0)
+                
                 self.optimizers[split].step()
 
             loss_hist_samples.append(loss['total'].item())
@@ -109,7 +122,7 @@ class AtlasBuilder:
                       f"Progress: {i/len(sample_iterator):.2f},"
                       f"Loss: {np.mean(loss_hist_samples):.4f},")
         return np.mean(loss_hist_samples)
-    
+  
     def validate(self, epoch_train):
         """
         Validate the model on the validation set.
@@ -390,60 +403,74 @@ class AtlasBuilder:
             wd.log({f"latent_anaylsis/{condition_key}": value})
 
     def regress_latent_condition(self, condition_key, epoch_train=0, epoch_val=0):
-        # 1. train regression network on training latents 
-        # 2. after each epoch, compute regression on validation latents
-        # 3. compute metrics
-        # 4. log metrics
-        train_data = self.latents['train'].detach().clone()
-        train_labels = self.datasets['train'].get_condition_values(condition_key, normed=True, device=self.device)[0]
-        val_data = self.latents['val'].detach().clone()
-        val_labels = self.datasets['val'].get_condition_values(condition_key, normed=True, device=self.device)[0]
-        regressor = LatentRegressor(self.args['inr_decoder']['latent_dim']).to(self.device)
-        optimizer = optim.AdamW(regressor.parameters(), lr=self.args['latent_anaylsis']['ba_regression']['lr'],
-                                weight_decay=0.0)
-        batch_size = 32
-        loss_fnc = torch.nn.L1Loss()
-        regressor.train()
-        regression_epochs = self.args['latent_anaylsis']['ba_regression']['epochs']
-        best_score_val = float('inf')
-        best_score_val_epoch = 0
-        for epoch in range(regression_epochs):
-            shuffle = np.random.permutation(len(train_data))
-            train_data_sh = train_data[shuffle]
-            train_labels_sh = train_labels[shuffle]
-            loss_train_epoch = []
-            for i in range(0, len(train_data_sh), batch_size):
-                train_data_batch = train_data_sh[i:i+batch_size]
-                train_labels_batch = train_labels_sh[i:i+batch_size]
-                optimizer.zero_grad()
-                pred_train = regressor(train_data_batch.squeeze()).squeeze()
-                loss_train = loss_fnc(pred_train, train_labels_batch)
-                loss_train.backward()
-                optimizer.step()
-                loss_train_epoch.append(loss_train.item())
-            if epoch % 1 == 0:
-                print(f"Epoch {epoch} - Loss: {np.mean(loss_train_epoch):.4f}")
-                # 2. validate regression network on validation latents
-                regressor.eval()
-                with torch.no_grad():   
-                    pred_val = regressor(val_data.squeeze())
-                    loss_val = loss_fnc(pred_val, val_labels) 
-                    print(f"Validation Loss: {loss_val.item():.4f}")
-                    # compute metrics
-                    pred_val_denormed = denormalize_conditions(self.args, condition_key, pred_val)
-                    val_labels_denormed = denormalize_conditions(self.args, condition_key, val_labels)
-                    mae = torch.mean(torch.abs(pred_val_denormed - val_labels_denormed))
-                    print(f"MAE for {condition_key}: {mae:.3f} at epoch {epoch_train}, epoch_val {epoch_val}\n")
-                    if mae < best_score_val:
-                        best_score_val = mae
-                        best_score_val_epoch = epoch
-                    # log metrics   
-                if self.args['logging']:
-                    wd.log({f"latent_anaylsis/{condition_key}_regression_train": loss_train.item()})
-                    wd.log({f"latent_anaylsis/{condition_key}_regression_val": loss_val.item()})
-                    wd.log({f"latent_anaylsis/{condition_key}_regression_mae_val": mae.item()})
-                regressor.train()
-        print(f"Best MAE for {condition_key}: {best_score_val:.3f} at regression_epoch {best_score_val_epoch} for epoch_train {epoch_train}, epoch_val {epoch_val}")
+            # 1. 获取并强制整形训练数据
+            train_data = self.latents['train'].detach().clone()
+            # [安全修复] 强制把 Latent 展平为 (N, 256)，防止被误认为是坐标
+            train_data = train_data.view(train_data.shape[0], -1) 
+            train_labels = self.datasets['train'].get_condition_values(condition_key, normed=True, device=self.device)[0]
+            
+            val_data = self.latents['val'].detach().clone()
+            val_data = val_data.view(val_data.shape[0], -1)
+            val_labels = self.datasets['val'].get_condition_values(condition_key, normed=True, device=self.device)[0]
+
+            # 初始化回归器 (输入维度 256)
+            latent_dim_size = train_data.shape[1]
+            regressor = LatentRegressor([latent_dim_size]).to(self.device)
+            
+            optimizer = optim.AdamW(regressor.parameters(), lr=self.args['latent_anaylsis']['ba_regression']['lr'],
+                                    weight_decay=0.0)
+            batch_size = 32
+            loss_fnc = torch.nn.L1Loss()
+            regressor.train()
+            
+            regression_epochs = self.args['latent_anaylsis']['ba_regression']['epochs']
+            best_score_val = float('inf')
+            best_score_val_epoch = 0
+            
+            for epoch in range(regression_epochs):
+                shuffle = np.random.permutation(len(train_data))
+                train_data_sh = train_data[shuffle]
+                train_labels_sh = train_labels[shuffle]
+                loss_train_epoch = []
+                
+                for i in range(0, len(train_data_sh), batch_size):
+                    train_data_batch = train_data_sh[i:i+batch_size]
+                    train_labels_batch = train_labels_sh[i:i+batch_size]
+                    
+                    optimizer.zero_grad()
+                    
+                    # [安全修复] 弃用危险的 .squeeze()，直接喂入正确的二维 Tensor (Batch, 256)
+                    pred_train = regressor(train_data_batch).view(-1)
+                    
+                    # 确保 labels 也是一维的
+                    loss_train = loss_fnc(pred_train, train_labels_batch.view(-1))
+                    loss_train.backward()
+                    optimizer.step()
+                    loss_train_epoch.append(loss_train.item())
+                    
+                if epoch % 1 == 0:
+                    print(f"Epoch {epoch} - Loss: {np.mean(loss_train_epoch):.4f}")
+                    regressor.eval()
+                    with torch.no_grad():   
+                        pred_val = regressor(val_data).view(-1)
+                        loss_val = loss_fnc(pred_val, val_labels.view(-1)) 
+                        
+                        # compute metrics
+                        pred_val_denormed = denormalize_conditions(self.args, condition_key, pred_val)
+                        val_labels_denormed = denormalize_conditions(self.args, condition_key, val_labels.view(-1))
+                        mae = torch.mean(torch.abs(pred_val_denormed - val_labels_denormed))
+                        
+                        if mae < best_score_val:
+                            best_score_val = mae
+                            best_score_val_epoch = epoch
+                            
+                    if self.args['logging']:
+                        wd.log({f"latent_anaylsis/{condition_key}_regression_train": loss_train.item()})
+                        wd.log({f"latent_anaylsis/{condition_key}_regression_val": loss_val.item()})
+                        wd.log({f"latent_anaylsis/{condition_key}_regression_mae_val": mae.item()})
+                    regressor.train()
+                    
+            print(f"Best MAE for {condition_key}: {best_score_val:.3f} at regression_epoch {best_score_val_epoch} for epoch_train {epoch_train}, epoch_val {epoch_val}")
 
     def save_state(self, epoch, split='train'):
         if self.args['save_model']:
