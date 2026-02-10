@@ -60,9 +60,9 @@ optimizer:
   inr_weight_decay: 0.0
   lr_latent: 5.0e-4
   latent_weight_decay: 0.0
-  lr_tf: 7.5e-3
+  lr_tf: 1.0e-4
   tf_weight_decay: 0.0
-  tf_weight: 0.05
+  tf_weight: 0.0
   loss_metric: 'l1'
   seg_weight: 1.0
   scheduler:

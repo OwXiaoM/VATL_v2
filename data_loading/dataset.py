@@ -101,13 +101,15 @@ class Data(Dataset):
                                                                       modalities[self.modality_keys[-1]])
         
         return modalities
+        
     def load_coords_and_values(self, modalities, normalize=True):
         """
-        加载坐标和像素值 (通用平衡采样版)
+        加载坐标和像素值 (通用平衡采样 + 边界过滤版)
         策略：
         1. 前景全采 (或截断至上限)
         2. 背景 1:1 采样
         3. 内存复制 (针对小数据量加速)
+        4. [核心] 过滤超出 World BBox 的点 (Discard)
         """
         # 1. 数据增强与加载
         modalities_data = self.augment_modalities(modalities)
@@ -117,10 +119,6 @@ class Data(Dataset):
         affine = modalities[self.modality_keys[-1]].affine
         img_shape = mra_data.shape
 
-        # [可选] 强制清洗背景
-        # 如果你希望模型完全忽略背景的灰度变化(比如头皮/噪声)，取消下面这行的注释
-        # mra_data[seg_data == 0] = 0.0
-
         # ==============================================================
         # [Step 1] 前景采样 (Foreground)
         # ==============================================================
@@ -129,7 +127,7 @@ class Data(Dataset):
         n_fg = len(fg_indices)
 
         # 设定前景点数量上限 (防止全分辨率大图导致显存溢出)
-        # 200万点通常是 24GB 显存的安全上限，你可以根据硬件调整
+        # 200万点通常是 24GB 显存的安全上限
         max_fg_points = 2000000 
         
         if n_fg > max_fg_points:
@@ -145,7 +143,6 @@ class Data(Dataset):
         target_n_bg = n_fg 
 
         # 随机生成候选点 (比目标多采一些，方便筛选)
-        # 这里乘以 2.0 是经验值，确保能筛出足够的背景点
         n_candidates = int(target_n_bg * 2.5) + 10000
         rand_coords = np.random.randint(0, [img_shape[0], img_shape[1], img_shape[2]], 
                                         size=(n_candidates, 3))
@@ -170,11 +167,8 @@ class Data(Dataset):
         # ==============================================================
         # [Step 4] 内存复制优化 (Memory Replication)
         # ==============================================================
-        # 针对小尺寸图像或稀疏血管的关键优化：
-        # 如果总点数太少(比如<10万)，GPU 瞬间跑完，I/O 成为瓶颈。
-        # 我们强制把数据复制多份，凑够 "target_total_points" (例如 200万)。
-        
-        target_buffer_size = 2000000 # 推荐值：200万 ~ 500万
+        # 针对小尺寸图像或稀疏血管的关键优化：防止 GPU 饥饿
+        target_buffer_size = 2000000 
         current_points = len(c_nz)
         
         if current_points < target_buffer_size and current_points > 0:
@@ -182,11 +176,11 @@ class Data(Dataset):
             c_nz = np.tile(c_nz, (repeat_factor, 1))
             c_nz = c_nz[:target_buffer_size] # 截断对齐
         
-        # [重要] 必须打乱！否则前半段全是前景，后半段全是背景，BatchNorm 会崩
+        # [重要] 必须打乱！
         np.random.shuffle(c_nz)
 
         # ==============================================================
-        # [Step 5] 提取像素值 & 坐标归一化
+        # [Step 5] 提取像素值 & 坐标归一化 & 边界过滤
         # ==============================================================
         # 1. 提取像素值
         values = np.stack([modalities_data[mod][c_nz[:, 0], c_nz[:, 1], c_nz[:, 2]].flatten() 
@@ -202,10 +196,19 @@ class Data(Dataset):
         # 4. 中心化
         coords = c_nz_phys - geometric_center
         
-        # 5. 归一化到 [-1, 1] 范围 (根据 config 中的 world_bbox)
+        # 5. 归一化到 [-1, 1] 范围
         if normalize:
             wb_center = self.world_bbox / 2
             coords = (coords / wb_center) 
+            
+            # === [核心修改] 过滤掉超出 [-1, 1] 范围的点 (Discard Strategy) ===
+            # 只要有一个坐标轴超出了 [-1, 1]，这个点就直接扔掉。
+            # 这样网络永远只看盒子内部，解决了大盒子数据稀疏和边界冲突的问题。
+            mask_inside = np.all(np.abs(coords) <= 1.0, axis=1)
+            coords = coords[mask_inside]
+            values = values[mask_inside]
+            # ============================================================
+
             values = normalize_intensities(values, self.args['dataset']['normalize_values'])
             
         return coords, values

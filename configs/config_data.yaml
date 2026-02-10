@@ -152,7 +152,7 @@ mra_atlas: # dhcp neonates multimodal dataset config
   label_names: ['Background', 'Vessel','CSF', 'cGM', 'WM', 'BG', 'Ventricles', 'Cerebellum', 'Deep_GM', 'Brainstem', 'HippocampiAmygdala']
   class_weights: [0.1, 3.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
   # class_weights: [0.00, 2.0, 3.0, 2.0, 1.5, 1.0, 1.0, 1.0, 1.0, 1.0]
-  world_bbox: [320, 320, 200] # size of the (roughly) smallest COMMON bounding box for all subjects in mm
+  world_bbox: [240, 240, 120] # size of the (roughly) smallest COMMON bounding box for all subjects in mm
   normalize_values: 'minmax' # 'minmax' or 'zscore'
 
 feta_atlas: # dhcp neonates multimodal dataset config

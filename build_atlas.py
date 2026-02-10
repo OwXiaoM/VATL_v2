@@ -98,9 +98,9 @@ class AtlasBuilder:
                 self.grad_scalers[split].scale(loss['total']).backward()
                 
                 # [新增] AMP 模式下的梯度裁剪 (如果你未来开启 AMP)
-                if split == 'train':
-                    self.grad_scalers[split].unscale_(self.optimizers[split])
-                    torch.nn.utils.clip_grad_norm_(self.inr_decoder[split].parameters(), max_norm=1.0)
+                #if split == 'train':
+                    #self.grad_scalers[split].unscale_(self.optimizers[split])
+                    #torch.nn.utils.clip_grad_norm_(self.inr_decoder[split].parameters(), max_norm=1.0)
                 
                 self.grad_scalers[split].step(self.optimizers[split])
                 self.grad_scalers[split].update()
@@ -109,8 +109,8 @@ class AtlasBuilder:
                 
                 # [新增] 普通模式下的梯度裁剪 (这是你现在的关键代码)
                 # 只有在 'train' 阶段才裁剪主网络的梯度，防止脏数据炸毁模型
-                if split == 'train':
-                    torch.nn.utils.clip_grad_norm_(self.inr_decoder[split].parameters(), max_norm=1.0)
+                #if split == 'train':
+                    #torch.nn.utils.clip_grad_norm_(self.inr_decoder[split].parameters(), max_norm=1.0)
                 
                 self.optimizers[split].step()
 
